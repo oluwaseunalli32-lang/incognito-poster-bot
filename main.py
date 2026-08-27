@@ -4,6 +4,13 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# ---------- Logging setup ----------
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # ---------- Simple JSON Storage ----------
 class Storage:
     def __init__(self, file_path='data.json'):
@@ -43,12 +50,13 @@ class Storage:
 
 storage = Storage()
 
-# ---------- Helper: Admin Check ----------
+# ---------- Helper: Admin Check with Logging ----------
 async def is_admin(bot, chat_id, user_id):
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ['administrator', 'creator']
-    except:
+    except Exception as e:
+        logger.error(f"Admin check failed for chat {chat_id}, user {user_id}: {e}")
         return False
 
 # ---------- Command Handlers ----------
@@ -101,15 +109,18 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic_str = f"Topic ID: `{topic}`" if topic is not None else "General (no topic)"
     await update.message.reply_text(f"Default group: `{chat_id}`\n{topic_str}", parse_mode='Markdown')
 
-# ---------- Main Message Handler ----------
+# ---------- Main Message Handler (fixed) ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
 
-    # Determine source (forwarded or typed)
-    if message.forward_from_chat:
-        # Forwarded from a group
-        source_chat = message.forward_from_chat
+    # Safely get forward info – using getattr to avoid AttributeError
+    forward_from_chat = getattr(message, 'forward_from_chat', None)
+    forward_from_message_id = getattr(message, 'forward_from_message_id', None)
+
+    if forward_from_chat:
+        # Message was forwarded from a group
+        source_chat = forward_from_chat
         if source_chat.type not in ['group', 'supergroup']:
             await message.reply_text("I can only repost from groups.")
             return
@@ -118,11 +129,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("You are not an admin of that group.")
             return
         from_chat_id = source_chat.id
-        from_message_id = message.forward_from_message_id
+        from_message_id = forward_from_message_id
         # Remember this group as default
         storage.set_user_default_chat(user.id, chat_id)
     else:
-        # Typed message (in private or group? We'll expect private, but handle any)
+        # Typed message – use the default group
         chat_id = storage.get_user_default_chat(user.id)
         if not chat_id:
             await message.reply_text(
@@ -173,7 +184,7 @@ def main():
     port = int(os.environ.get('PORT', 8443))
 
     if webhook_url:
-        print(f"Starting webhook on port {port} with URL {webhook_url}/webhook")
+        logger.info(f"Starting webhook on port {port} with URL {webhook_url}/webhook")
         app.run_webhook(
             listen='0.0.0.0',
             port=port,
@@ -181,7 +192,7 @@ def main():
             webhook_url=webhook_url + '/webhook'
         )
     else:
-        print("WEBHOOK_URL not set – starting polling")
+        logger.info("WEBHOOK_URL not set – starting polling")
         app.run_polling()
 
 if __name__ == '__main__':

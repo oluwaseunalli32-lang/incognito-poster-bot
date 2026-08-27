@@ -74,7 +74,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. *Forward* any message from that group to me in private – I'll repost it.\n"
         "3. To set a default *topic*, go to the group, enter the topic, and send `/settopic`.\n"
         "4. You can also *type* any message to me in private – I'll post it to your default group.\n"
-        "5. Check your settings with `/status`.",
+        "5. Reply to a message in a group with `/post` to repost it (works even if forwarding is disabled).\n"
+        "6. Reply to a message in a group with `/sendto <chat_id>` to cross-post it to another group.\n"
+        "7. Check your settings with `/status`.",
         parse_mode='Markdown'
     )
 
@@ -109,17 +111,95 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic_str = f"Topic ID: `{topic}`" if topic is not None else "General (no topic)"
     await update.message.reply_text(f"Default group: `{chat_id}`\n{topic_str}", parse_mode='Markdown')
 
-# ---------- Main Message Handler (fixed) ----------
+# ---------- /post command – repost inside same group ----------
+async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reply to a message with /post to repost it as the bot in the same group."""
+    message = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+
+    # Only works in groups
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("This command works only in groups.")
+        return
+
+    # User must be an admin
+    if not await is_admin(context.bot, chat.id, user.id):
+        await message.reply_text("You must be an admin to use this.")
+        return
+
+    # Must reply to a message
+    if not message.reply_to_message:
+        await message.reply_text("Reply to a message with /post to repost it.")
+        return
+
+    target_msg = message.reply_to_message
+    thread_id = storage.get_user_topic(user.id, chat.id)
+
+    try:
+        await context.bot.copy_message(
+            chat_id=chat.id,
+            from_chat_id=chat.id,
+            message_id=target_msg.message_id,
+            message_thread_id=thread_id
+        )
+        await message.reply_text("✅ Message reposted successfully.")
+    except Exception as e:
+        await message.reply_text(f"❌ Failed to repost: {e}")
+
+# ---------- /sendto command – cross-post to another group ----------
+async def sendto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reply to a message with /sendto <target_chat_id> to copy it to another group."""
+    message = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("This command works only in groups.")
+        return
+
+    if not await is_admin(context.bot, chat.id, user.id):
+        await message.reply_text("You must be an admin to use this.")
+        return
+
+    if not message.reply_to_message:
+        await message.reply_text("Reply to a message with /sendto <target_chat_id> to copy it to another group.")
+        return
+
+    args = context.args
+    if not args:
+        await message.reply_text("Usage: /sendto <target_chat_id>\nExample: /sendto -100123456789")
+        return
+
+    try:
+        target_chat_id = int(args[0])
+    except ValueError:
+        await message.reply_text("Invalid chat ID. Make sure it's a number (e.g., -100123456789).")
+        return
+
+    target_msg = message.reply_to_message
+
+    try:
+        await context.bot.copy_message(
+            chat_id=target_chat_id,
+            from_chat_id=chat.id,
+            message_id=target_msg.message_id,
+            message_thread_id=None  # Posts to general chat; add topic support if needed
+        )
+        await message.reply_text(f"✅ Message copied to chat ID `{target_chat_id}` successfully.")
+    except Exception as e:
+        await message.reply_text(f"❌ Failed to copy: {e}")
+
+# ---------- Main Message Handler (private only) ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This only runs in private chats due to the filter in main()
     user = update.effective_user
     message = update.effective_message
 
-    # Safely get forward info – using getattr to avoid AttributeError
     forward_from_chat = getattr(message, 'forward_from_chat', None)
     forward_from_message_id = getattr(message, 'forward_from_message_id', None)
 
     if forward_from_chat:
-        # Message was forwarded from a group
         source_chat = forward_from_chat
         if source_chat.type not in ['group', 'supergroup']:
             await message.reply_text("I can only repost from groups.")
@@ -130,10 +210,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         from_chat_id = source_chat.id
         from_message_id = forward_from_message_id
-        # Remember this group as default
         storage.set_user_default_chat(user.id, chat_id)
     else:
-        # Typed message – use the default group
         chat_id = storage.get_user_default_chat(user.id)
         if not chat_id:
             await message.reply_text(
@@ -150,16 +228,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from_chat_id = message.chat.id
         from_message_id = message.message_id
 
-    # Get the topic for this user in this group
     thread_id = storage.get_user_topic(user.id, chat_id)
 
-    # Copy the message to the target group (with topic if any)
     try:
         await context.bot.copy_message(
             chat_id=chat_id,
             from_chat_id=from_chat_id,
             message_id=from_message_id,
-            message_thread_id=thread_id   # None = general
+            message_thread_id=thread_id
         )
         await message.reply_text("✅ Message posted successfully.")
     except Exception as e:
@@ -177,9 +253,12 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("settopic", settopic))
     app.add_handler(CommandHandler("status", status))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("post", post_command))
+    app.add_handler(CommandHandler("sendto", sendto_command))
 
-    # Use webhook on Render, fallback to polling locally
+    # 👇 Critical: only process private messages (no group echo)
+    app.add_handler(MessageHandler(filters.PRIVATE & ~filters.COMMAND, handle_message))
+
     webhook_url = os.environ.get('WEBHOOK_URL')
     port = int(os.environ.get('PORT', 8443))
 

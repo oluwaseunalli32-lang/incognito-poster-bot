@@ -98,7 +98,7 @@ async def settopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Topic set to current topic (ID: `{thread_id}`).", parse_mode='Markdown')
 
     storage.set_user_topic(user.id, chat.id, thread_id)
-    storage.set_user_default_chat(user.id, chat.id)   # also remember this group
+    storage.set_user_default_chat(user.id, chat.id)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -118,17 +118,14 @@ async def post_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
 
-    # Only works in groups
     if chat.type not in ['group', 'supergroup']:
         await message.reply_text("This command works only in groups.")
         return
 
-    # User must be an admin
     if not await is_admin(context.bot, chat.id, user.id):
         await message.reply_text("You must be an admin to use this.")
         return
 
-    # Must reply to a message
     if not message.reply_to_message:
         await message.reply_text("Reply to a message with /post to repost it.")
         return
@@ -184,7 +181,7 @@ async def sendto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=target_chat_id,
             from_chat_id=chat.id,
             message_id=target_msg.message_id,
-            message_thread_id=None  # Posts to general chat; add topic support if needed
+            message_thread_id=None
         )
         await message.reply_text(f"✅ Message copied to chat ID `{target_chat_id}` successfully.")
     except Exception as e:
@@ -256,8 +253,8 @@ def main():
     app.add_handler(CommandHandler("post", post_command))
     app.add_handler(CommandHandler("sendto", sendto_command))
 
-    # 👇 Critical: only process private messages (no group echo)
-    app.add_handler(MessageHandler(filters.PRIVATE & ~filters.COMMAND, handle_message))
+    # 👇 Fixed: Use ChatType.PRIVATE instead of PRIVATE
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
 
     webhook_url = os.environ.get('WEBHOOK_URL')
     port = int(os.environ.get('PORT', 8443))
